@@ -17,10 +17,10 @@ VISUALIZE_STEPS = 20
 
 class StudentController:
     def __init__(self):
-        self._state_size = 2 + 2 * N # initially, we only need to know x and y of the robot and the number of landmarks
-        self._pose = np.full(self._state_size, np.nan) # set each one to have a bad value of np.nan
-        self._pose[0:2] = 0.0  # robot starts known
-        self._prev_variance = np.eye(self._state_size) * 0.1 # have an initial uncertainty of .1
+        self._state_size = 2 # initially, we only need to know x and y of the robot and the number of landmarks
+        self._pose = np.zeros(self._state_size) # know initial values of the pose is 0
+        self._map_with_ordering = {} # key will be which landmark this is
+        self._prev_variance = np.eye(self._state_size) * 0.01 # since know robot initial state, make the variance very small
         self._sigma = .005
         self._known_landmark = False
         self._visualize_count = 0
@@ -52,6 +52,8 @@ class StudentController:
         # TODO: add your controllers here.
 
         self._actual_theta = sensors["heading"]
+        print("robot heading:", self._actual_theta)
+        print("robot_odometry:", sensors["odometry"])
         # 1)  Prediction Step
         pose_prediction = self._pose.copy()
         
@@ -60,6 +62,7 @@ class StudentController:
         # 2)  Correction Step
         print(sensors["observed_landmarks"])
         pose_correction, variance_correction = self.correction(sensors, pose_prediction, variance_prediction)
+        # pose_correction, variance_correction = pose_prediction, variance_prediction # testing prediction step
 
         # update to save values for next steps.
         self._pose = pose_correction
@@ -77,8 +80,8 @@ class StudentController:
             self._visualize_count = 0
         self._visualize_count += 1
 
-        control_dict["left_motor"] = -1
-        control_dict["right_motor"] = -1
+        control_dict["left_motor"] = 1
+        control_dict["right_motor"] = 1
         
 
         return control_dict, pose_correction, estimated_map
@@ -89,18 +92,19 @@ class StudentController:
         delta_distance, delta_theta = sensors["odometry"]
         pose_prediction[0] += delta_distance * math.cos(self._actual_theta) # update x position with new theta
         pose_prediction[1] += delta_distance * math.sin(self._actual_theta) # update y position with new theta
+        print("pose_prediction[0]:", pose_prediction[0])
+        print("pose_prediction[1]:", pose_prediction[1])
 
         # sigma_bar Below is to get the variance of the prediction
         G_r = np.array([[1, 0], 
                       [0, 1]]) # Jacobian of the motion model for robot
-       
 
         # create entire jacobian 
         G = np.eye(self._state_size)      # start with identity
         G[0:2, 0:2] = G_r           # insert robot motion Jacobian
         
         variance_prediction = G @ self._prev_variance @ G.T
-        variance_prediction_noise = np.eye(self._state_size) * self._sigma
+        variance_prediction_noise = np.eye(self._state_size) * self._sigma**2
         variance_prediction += variance_prediction_noise # add noise
 
         return pose_prediction, variance_prediction
@@ -119,17 +123,58 @@ class StudentController:
             # since never seen this landmark before, we will add it to the map and skip calculations
             if self._known_landmark:
                 # 2) figure out which slot to put the landmark in
-                landmark_num = int(landmark_id.split('_')[1]) # get number as this is known correspondance
-                landmark_start = 2 + 2 * landmark_num
-                # 3) check if correspondance is in map already
-                if np.isnan(pose_correction[landmark_start]):
+                if landmark_id not in self._map_with_ordering:
+                    # 2a) first find the first place I can start iterating through
+                    # assign next available slot
+                    landmark_slot = len(self._map_with_ordering)
+                    self._map_with_ordering[landmark_id] = landmark_slot
+
+                    # compute index in state
+                    landmark_start = 2 + 2 * landmark_slot
+
+                    # 🔴 EXPAND STATE VECTOR
+                    self._pose = np.concatenate((pose_correction, np.zeros(2)))
+                    pose_correction = self._pose
+
+                    # 🔴 EXPAND COVARIANCE MATRIX
+                    old_size = variance_correction.shape[0]
+                    new_size = old_size + 2
+
+                    new_cov = np.zeros((new_size, new_size))
+                    new_cov[:old_size, :old_size] = variance_correction
+                    variance_correction = new_cov
+
+                    self._state_size = new_size
                     # calculate where the robot thinks the landmark is knowing robot position and where the relative position from landmark is
                     pose_correction[landmark_start] = pose_correction[0] + landmark_dist * np.cos(landmark_heading + self._actual_theta)
                     pose_correction[landmark_start + 1] = pose_correction[1] + landmark_dist * np.sin(landmark_heading + self._actual_theta)
-                    variance_correction[landmark_start:landmark_start+2, landmark_start:landmark_start+2] = np.eye(2) * .1 # when new and just added, have more of a uncertainty
-                    variance_correction[landmark_start:landmark_start+2, 0:2] = 0.1 * np.eye(2)
-                    variance_correction[0:2, landmark_start:landmark_start+2] = 0.1 * np.eye(2)
+                    theta = self._actual_theta
+                    r = landmark_dist
+                    bearing = landmark_heading
+ 
+                    Gz = np.array([
+                        [np.cos(theta + bearing), -r * np.sin(theta + bearing)],
+                        [np.sin(theta + bearing),  r * np.cos(theta + bearing)]
+                    ]) # jacobian with respect to odometry readings
+
+                    R = np.diag([landmark_dist_noise**2, landmark_heading_noise**2])
+
+                    P_rr = variance_correction[0:2, 0:2]
+
+                    P_ll = Gz @ R @ Gz.T + P_rr
+                    
+                    variance_correction[landmark_start:landmark_start+2, landmark_start:landmark_start+2] = P_ll # when new and just added, have more of a uncertainty
+                    
+                    # Robot covariance of how the robot is related to the the landmark
+                    variance_correction[0:2, landmark_start:landmark_start+2] = P_rr
+                    variance_correction[landmark_start:landmark_start+2, 0:2] = P_rr.T
+                    
                     continue
+                
+                # if we have already seen this landmark before, just calculate this as before.
+                landmark_slot = self._map_with_ordering[landmark_id]
+                landmark_start = 2 + 2 * landmark_slot
+                    
             else:
                 # unknown correspondance course
                 print("have not implemented this yet, but need to predict which landmark this is")
@@ -177,20 +222,17 @@ class StudentController:
     # Creates map from numpy array
     def array2dict(self):
         estimated_map = {}
-        for landmark_num in range(5):
-            landmark_idx = 2 + 2 * landmark_num
 
-            # check if we have a valid value for this landmark
-            if not np.isnan(self._pose[landmark_idx]):
+        # invert mapping: slot → landmark_id
+        slot_to_landmark = {v: k for k, v in self._map_with_ordering.items()}
 
-                # if there is a valid value, name according to known or unknow correspondence
-                if self._known_landmark:
-                    landmark_name = "Box_" + str(landmark_num)
-                else:
-                    landmark_name = "Unknown_ " + str(landmark_num)
+        for slot, landmark_id in slot_to_landmark.items():
+            landmark_idx = 2 + 2 * slot
+            estimated_map[landmark_id] = [
+                self._pose[landmark_idx],
+                self._pose[landmark_idx + 1]
+            ]
 
-                # fill in map with name + x and y values
-                estimated_map[landmark_name] = [self._pose[landmark_idx], self._pose[landmark_idx+1]]
         return estimated_map
 
     def plot_covariance_ellipse(self, mean, cov, ax, n_std=2.0, color='blue'):
@@ -218,8 +260,7 @@ class StudentController:
             lw=2
         )
 
-        ax.add_patch(ellipse)
-            
+        ax.add_patch(ellipse)        
 
     def visualize_slam(self, state, covariance, sensors):
         ax = self._ax
@@ -237,16 +278,26 @@ class StudentController:
         self.plot_covariance_ellipse([x, y], covariance[0:2, 0:2], ax, color='red')
 
         # --- Landmarks ---
-        for i in range(N):
-            idx = 2 + 2*i
-            if not np.isnan(state[idx]):
-                lx = state[idx]
-                ly = state[idx+1]
-                ax.plot(lx, ly, 'bs')
-                ax.text(lx + 0.05, ly + 0.05, f"L{i}")
-                cov_ll = covariance[idx:idx+2, idx:idx+2]
-                self.plot_covariance_ellipse([lx, ly], cov_ll, ax, color='blue')
-                ax.plot([x, lx], [y, ly], 'g--', alpha=0.3)
+        for landmark_id, slot in self._map_with_ordering.items():
+            idx = 2 + 2 * slot
+
+            lx = state[idx]
+            ly = state[idx+1]
+
+            ax.plot(lx, ly, 'bs')
+
+            # extract number (Box_4 → 4)
+            try:
+                label_num = landmark_id.split('_')[1]
+            except:
+                label_num = landmark_id
+
+            ax.text(lx + 0.05, ly + 0.05, f"L{label_num}")
+
+            cov_ll = covariance[idx:idx+2, idx:idx+2]
+            self.plot_covariance_ellipse([lx, ly], cov_ll, ax, color='blue')
+
+            ax.plot([x, lx], [y, ly], 'g--', alpha=0.3)
 
         # --- Observations ---
         for _, (dist, bearing) in sensors["observed_landmarks"].items():
@@ -262,11 +313,3 @@ class StudentController:
 
         plt.draw()
         plt.pause(0.001)  # tiny pause to allow GUI to update
-
-            
-
-
-    
-
-
-
