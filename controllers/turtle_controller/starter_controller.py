@@ -34,7 +34,7 @@ class StudentController:
         self.current_cell = None # where am I currently?
         self.current_goal = None # where am I trying to go?
         self.goal_reached_flag = False # have I reached my goal? if so, then I should pick a new goal
-        self.velocity_magnitude = 4
+        self.velocity_magnitude = 5
         # below are for visualization
         self._fig, self._ax = plt.subplots()
         plt.ion()  # interactive mode on
@@ -260,9 +260,9 @@ class StudentController:
         lidar = sensors["lidar"]
         n = 360 # len(lidar)
 
-        front = np.min(lidar[135:225])
-        left = np.min(lidar[60:135]) # 60 instead of 45 as don't want to look too left where it is backwards
-        right = np.min(lidar[225:300]) # 300 instead of 215 as don't want to look too right where it is backwards
+        front = np.min(lidar[135:225]) # potentially will play around from lidar[135:225] and change it as it would potentially make traversal be faster
+        left = np.min(lidar[70:135]) # 70 instead of 45 as don't want to look too left where it is backwards
+        right = np.min(lidar[225:290]) # 290 instead of 315 as don't want to look too right where it is backwards
         # front = lidar[180]
         # left = lidar[90]
         # right = lidar[270]
@@ -351,8 +351,8 @@ class StudentController:
             target_angle = math.atan2(dy, dx)
             error = math.atan2(math.sin(target_angle - self._actual_theta), math.cos(target_angle - self._actual_theta))
 
-            turn_goal = 2.0 * error
-            forward_goal = 2.0 * min(np.hypot(dx, dy), 1.0)
+            turn_goal = self.velocity_magnitude * error
+            forward_goal = self.velocity_magnitude * min(np.hypot(dx, dy), 1.0)
 
             alpha = 0.7  # how much you trust obstacle avoidance
 
