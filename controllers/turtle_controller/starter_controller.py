@@ -13,6 +13,7 @@ landmark_heading_noise = .05
 WORLD_MIN = -2.5
 WORLD_MAX = 2.5
 VISUALIZE_STEPS = 20
+visualize = True
 
 
 class StudentController:
@@ -30,11 +31,14 @@ class StudentController:
         self.goals = {} # dictionary with key as (x,y) and value as how many times we have been to that goal
         self.goals_subdivisions = 5 # number of subdivisions for the goals, so if 5 then will have 25 total goals in a 5x5 grid
         self.initialize_goals(self.goals_subdivisions)
-        self._safe_distance = .15 # safe distance to keep from obstacles
+        self._safe_distance = .207 # safe distance to keep from obstacles
         self.current_cell = None # where am I currently?
         self.current_goal = None # where am I trying to go?
         self.goal_reached_flag = False # have I reached my goal? if so, then I should pick a new goal
         self.velocity_magnitude = 5
+        self.goal_steps_max = 670 # max number of steps trying to go to certain goal. the max steps shouldn't be too much as the goal_chooser should be choosing landmakrs that are close
+        self.goal_steps = 0 # number of steps chasing this goal
+        self.GATE_THRESHOLD = 20 # with respect to variance, what should the Mahalanobis distance threshold be. A parameter to play around with
         # below are for visualization
         self._fig, self._ax = plt.subplots()
         plt.ion()  # interactive mode on
@@ -97,11 +101,13 @@ class StudentController:
         print("estimated map: ", estimated_map)
         # print("robot_variance:", variance_correction[0:2,0:2])
 
-        # visualize again if hit step count
-        if self._visualize_count % VISUALIZE_STEPS == 0:
-            self.visualize_slam(self._pose, self._prev_variance, sensors)
-            self._visualize_count = 0
-        self._visualize_count += 1
+        # check if want visualization
+        if visualize:
+            # visualize again if hit step count
+            if self._visualize_count % VISUALIZE_STEPS == 0:
+                self.visualize_slam(self._pose, self._prev_variance, sensors)
+                self._visualize_count = 0
+            self._visualize_count += 1
 
 
         control_dict["left_motor"], control_dict["right_motor"] = self.robot_control(sensors, estimated_pose, estimated_map)
@@ -145,115 +151,207 @@ class StudentController:
     
     # get correction value for both pose and variance
     def correction(self, sensors, pose_prediction, variance_prediction):
-        # 1) iterate through all landmarks and update matrixes through each step.
         variance_correction = variance_prediction
         pose_correction = pose_prediction
-        for landmark_id, (landmark_dist, landmark_heading) in sensors["observed_landmarks"].items():
 
-            # check if known or unknown correspondance
+        for landmark_id, (landmark_dist, landmark_heading) in sensors["observed_landmarks"].items():
+            z = np.array([landmark_dist, landmark_heading])
+
+            # known correspondence mode trigger if simulator starts giving BOX ids
             if not self._known_landmark and landmark_id.startswith("BOX"):
                 self._known_landmark = True
 
-            # since never seen this landmark before, we will add it to the map and skip calculations
-            if self._known_landmark:
-                # 2) figure out which slot to put the landmark in
-                if landmark_id not in self._map_with_ordering:
-                    # 2a) first find the first place I can start iterating through
-                    # assign next available slot
-                    landmark_slot = len(self._map_with_ordering)
-                    self._map_with_ordering[landmark_id] = landmark_slot
+            landmark_start = None
 
-                    # compute index in state
+            # =========================================================
+            # CASE 1: known correspondence
+            # =========================================================
+            if self._known_landmark:
+                if landmark_id not in self._map_with_ordering:
+                    pose_correction, variance_correction, landmark_start = self.add_new_landmark(
+                        landmark_id, landmark_dist, landmark_heading, pose_correction, variance_correction
+                    )
+                    continue
+                else:
+                    landmark_slot = self._map_with_ordering[landmark_id]
                     landmark_start = 2 + 2 * landmark_slot
 
-                    # 🔴 EXPAND STATE VECTOR
-                    self._pose = np.concatenate((pose_correction, np.zeros(2)))
-                    pose_correction = self._pose
-
-                    # 🔴 EXPAND COVARIANCE MATRIX
-                    old_size = variance_correction.shape[0]
-                    new_size = old_size + 2
-
-                    new_cov = np.zeros((new_size, new_size))
-                    new_cov[:old_size, :old_size] = variance_correction
-                    variance_correction = new_cov
-
-                    self._state_size = new_size
-                    # calculate where the robot thinks the landmark is knowing robot position and where the relative position from landmark is
-                    pose_correction[landmark_start] = pose_correction[0] + landmark_dist * np.cos(landmark_heading + self._actual_theta)
-                    pose_correction[landmark_start + 1] = pose_correction[1] + landmark_dist * np.sin(landmark_heading + self._actual_theta)
-                    theta = self._actual_theta
-                    r = landmark_dist
-                    bearing = landmark_heading
- 
-                    Gz = np.array([
-                        [np.cos(theta + bearing), -r * np.sin(theta + bearing)],
-                        [np.sin(theta + bearing),  r * np.cos(theta + bearing)]
-                    ]) # jacobian with respect to odometry readings
-
-                    R = np.diag([landmark_dist_noise**2, landmark_heading_noise**2])
-
-                    P_rr = variance_correction[0:2, 0:2]
-
-                    # --- Initialize new landmark variance properly ---
-                    landmark_init_var = 0.5  # adjust based on your world scale
-                    variance_correction[landmark_start:landmark_start+2, landmark_start:landmark_start+2] = np.eye(2) * landmark_init_var
-
-                    # --- Set robot-to-landmark covariance ---
-                    # variance_correction[0:2, landmark_start:landmark_start+2] = P_rr
-                    # variance_correction[landmark_start:landmark_start+2, 0:2] = P_rr.T
-                    variance_correction[0:2, landmark_start:landmark_start+2] = 0
-                    variance_correction[landmark_start:landmark_start+2, 0:2] = 0
-                    
-                    continue
-                
-                # if we have already seen this landmark before, just calculate this as before.
-                landmark_slot = self._map_with_ordering[landmark_id]
-                landmark_start = 2 + 2 * landmark_slot
-                    
+            # =========================================================
+            # CASE 2: unknown correspondence
+            # =========================================================
             else:
-                # unknown correspondance course
-                print("have not implemented this yet, but need to predict which landmark this is")
-                # probably need to iterate through each pair of landmark x and y and see which one is the closest to it
+                # If we literally have no landmarks yet, create first one
+                if len(self._map_with_ordering) == 0:
+                    new_id = f"LM_{len(self._map_with_ordering)}"
+                    pose_correction, variance_correction, landmark_start = self.add_new_landmark(
+                        new_id, landmark_dist, landmark_heading, pose_correction, variance_correction
+                    )
+                    continue
 
-            # 4) H_t, Jacobian of the observation model
-            dx = pose_correction[landmark_start] - pose_correction[0]
-            dy = pose_correction[landmark_start + 1] - pose_correction[1]
-            r = math.sqrt(dx**2 + dy**2)
+                association = self.associate_unknown_landmark(z, pose_correction, variance_correction)
 
-            H_t = np.zeros((2, self._state_size))
+                if association is None:
+                    # no acceptable match -> create a new landmark
+                    new_id = f"LM_{len(self._map_with_ordering)}"
+                    pose_correction, variance_correction, landmark_start = self.add_new_landmark(
+                        new_id, landmark_dist, landmark_heading, pose_correction, variance_correction
+                    )
+                    continue
+                else:
+                    landmark_start, H_t, h_predict, S, d2 = association
+                    # proceed to EKF update below using associated landmark
 
-            H_t[:,0:2] = np.array([[-dx/r, -dy/r],
-                            [dy/r**2, -dx/r**2]]) # set the robot H_t values
-            
-            H_t[:,landmark_start:landmark_start+2] = np.array([[dx/r, dy/r],
-                                                          [-dy/r**2, dx/r**2]]) # set the landmark H_t value
-            
-            # 5) K_t, solving for gain for correction step
-            R = np.diag([landmark_dist_noise**2, landmark_heading_noise**2]) # observation noise covariance that is gotten from look at code in turtle_controller.py
-            K_t = variance_correction @ H_t.T @ np.linalg.inv(H_t @ variance_correction @ H_t.T + R)
+            # =========================================================
+            # EKF correction for associated/known landmark
+            # =========================================================
+            if self._known_landmark:
+                h_predict, H_t = self.compute_measurement_model(pose_correction, landmark_start)
+                R = np.diag([landmark_dist_noise**2, landmark_heading_noise**2])
+                S = H_t @ variance_correction @ H_t.T + R
+            else:
+                # unknown case already computed H_t/h_predict/S during association
+                R = np.diag([landmark_dist_noise**2, landmark_heading_noise**2])
 
-            # 6) solve for sigma_t or the correction variance
+            K_t = variance_correction @ H_t.T @ np.linalg.inv(S)
+
+            error = z - h_predict
+            error[1] = self.wrap_angle(error[1])
+
+            pose_correction = pose_correction + K_t @ error
             variance_correction = (np.eye(self._state_size) - K_t @ H_t) @ variance_correction
 
-            # 7) solve for mu_t or the correction pose
-            # predicted measurement h_predict
-            h_predict = np.array([
-                r,
-                np.arctan2(dy, dx) - self._actual_theta
-            ])
-            # observation / measured landmark
-            z_hat = np.array([
-                landmark_dist,
-                landmark_heading
-            ])
-
-            error = z_hat - h_predict
-            error[1] = np.arctan2(np.sin(error[1]), np.cos(error[1]))
-
-            pose_correction = pose_correction + K_t @ error # this is updating mu_t term
-
         return pose_correction, variance_correction
+
+    def wrap_angle(self, angle):
+        return math.atan2(math.sin(angle), math.cos(angle))
+
+
+    def compute_measurement_model(self, pose, landmark_start):
+        """
+        Predict measurement z = [range, bearing] to a landmark and compute H.
+        State is [x, y, l1x, l1y, l2x, l2y, ...]
+        Theta is taken from self._actual_theta (not in state).
+        """
+        dx = pose[landmark_start] - pose[0]
+        dy = pose[landmark_start + 1] - pose[1]
+        q = dx**2 + dy**2
+        r = math.sqrt(max(q, 1e-12))
+
+        z_pred = np.array([
+            r,
+            self.wrap_angle(math.atan2(dy, dx) - self._actual_theta)
+        ])
+
+        H = np.zeros((2, self._state_size))
+
+        # derivative wrt robot x,y
+        H[:, 0:2] = np.array([
+            [-dx / r,      -dy / r],
+            [ dy / q,      -dx / q]
+        ])
+
+        # derivative wrt landmark x,y
+        H[:, landmark_start:landmark_start+2] = np.array([
+            [ dx / r,       dy / r],
+            [-dy / q,       dx / q]
+        ])
+
+        return z_pred, H
+
+
+    def associate_unknown_landmark(self, z, pose, P):
+        """
+        Associate unknown measurement z=[range, bearing] with the most likely existing landmark
+        using Mahalanobis distance. Returns:
+            best_landmark_start, best_H, best_z_pred, best_S, best_d2
+        or None if no acceptable match exists.
+        """
+        if len(self._map_with_ordering) == 0:
+            return None
+
+        R = np.diag([landmark_dist_noise**2, landmark_heading_noise**2])
+
+        best = None
+        best_d2 = float("inf")
+
+        for landmark_id, slot in self._map_with_ordering.items():
+            landmark_start = 2 + 2 * slot
+
+            z_pred, H = self.compute_measurement_model(pose, landmark_start)
+
+            innovation = z - z_pred
+            innovation[1] = self.wrap_angle(innovation[1])
+
+            S = H @ P @ H.T + R
+
+            try:
+                S_inv = np.linalg.inv(S)
+            except np.linalg.LinAlgError:
+                continue
+
+            d2 = innovation.T @ S_inv @ innovation
+
+            if d2 < best_d2:
+                best_d2 = d2
+                best = (landmark_start, H, z_pred, S, d2)
+
+        # Gate threshold:
+        # 2D chi-square 95% ~= 5.99
+        # 2D chi-square 99% ~= 9.21
+
+        if best is None or best_d2 > self.GATE_THRESHOLD:
+            return None
+
+        return best
+
+    def add_new_landmark(self, landmark_id, landmark_dist, landmark_heading, pose_correction, variance_correction):
+        landmark_slot = len(self._map_with_ordering)
+        self._map_with_ordering[landmark_id] = landmark_slot
+
+        landmark_start = 2 + 2 * landmark_slot
+
+        # expand state
+        pose_correction = np.concatenate((pose_correction, np.zeros(2)))
+
+        # initialize landmark mean
+        pose_correction[landmark_start] = pose_correction[0] + landmark_dist * np.cos(landmark_heading + self._actual_theta)
+        pose_correction[landmark_start + 1] = pose_correction[1] + landmark_dist * np.sin(landmark_heading + self._actual_theta)
+
+        # expand covariance
+        oldP = variance_correction.copy()
+        old_size = oldP.shape[0]
+        new_size = old_size + 2
+
+        new_cov = np.zeros((new_size, new_size))
+        new_cov[:old_size, :old_size] = oldP
+
+        theta = self._actual_theta
+        r = landmark_dist
+        bearing = landmark_heading
+
+        # Jacobian wrt existing state [x, y, landmarks...]
+        Gx = np.zeros((2, old_size))
+        Gx[:, 0:2] = np.eye(2)
+
+        # Jacobian wrt measurement [range, bearing]
+        Gz = np.array([
+            [np.cos(theta + bearing), -r * np.sin(theta + bearing)],
+            [np.sin(theta + bearing),  r * np.cos(theta + bearing)]
+        ])
+
+        R = np.diag([landmark_dist_noise**2, landmark_heading_noise**2])
+
+        P_new_old = Gx @ oldP
+        P_new_new = Gx @ oldP @ Gx.T + Gz @ R @ Gz.T
+
+        new_cov[landmark_start:landmark_start+2, :old_size] = P_new_old
+        new_cov[:old_size, landmark_start:landmark_start+2] = P_new_old.T
+        new_cov[landmark_start:landmark_start+2, landmark_start:landmark_start+2] = P_new_new
+
+        self._state_size = new_size
+
+        return pose_correction, new_cov, landmark_start
+
 
     def robot_control(self, sensors, estimated_pose, estimated_map):
         # 1) Look at Lidar data and see if there is something in viscinity
@@ -266,7 +364,7 @@ class StudentController:
         # front = lidar[180]
         # left = lidar[90]
         # right = lidar[270]
-        print("front:", front, "left:", left, "right:", right)
+        # print("front:", front, "left:", left, "right:", right)
 
         # theres a few different cases to consider
         # 1) something in front and to the left and right
@@ -288,17 +386,26 @@ class StudentController:
         # get the current cell the robot to see if we have entered a new cell and need to update goals dictionary
         current_cell = self.get_cell_from_position(robot_x, robot_y)
         if current_cell != self.current_cell: # this is true as at this point self.current_cell is the previous cell we were in
-            print("Entered new cell:", current_cell)
+            # print("Entered new cell:", current_cell)
             self.goals[current_cell] += (WORLD_MAX - WORLD_MIN) / self.goals_subdivisions # add to the count of how many times we have been to this cell, and the amount we add is based on the size of the cell so that it is more significant if we have been to a smaller cell multiple times than a larger cell multiple times
             self.current_cell = current_cell
 
+        # below is how to set a new goal
         if self.current_goal is None:
-            self.current_goal = self.goal_chooser(estimated_pose)
+            self.current_goal = self.goal_chooser(estimated_pose) # if don't have goal, set a goal (case of when we just started to SLAM)
         elif current_cell == self.current_goal:
-            print("Reached goal:", self.current_goal)
+            # if reached goal
+            # print("Reached goal:", self.current_goal)
             self.goal_reached_flag = True
             self.current_goal = self.goal_chooser(estimated_pose)
+            self.goal_steps = 0
+        elif self.goal_steps > self.goal_steps_max:
+            # if tried to go to a certain goal for too long. Sometimes can get stuck in a corner if things are perfectly alligned
+            print("Changing goals")
+            self.current_goal = self.goal_chooser(estimated_pose) # want to switch goals now. Since goal_chooser looks for a goal, it will go to new goal
+            self.goal_steps = 0
 
+        self.goal_steps += 1 # increase the goal steps
         curr_goal_x, curr_goal_y = self.current_goal
         print("current goal:", (curr_goal_x, curr_goal_y), "times gone to: ", self.goals[self.current_goal])
 
@@ -307,22 +414,22 @@ class StudentController:
             # Need to determine between Case 1-4, but basically will just spin in place (Some of these cases are a bit redundant, can optimize if have time later)
             if left < self._safe_distance and right < self._safe_distance:
                 # Case 1
-                print("Obstacle in Front, Left, and Right")
+                # print("Obstacle in Front, Left, and Right")
                 # print("left motor:", -1, "right motor:", 1)
                 return -self.velocity_magnitude, self.velocity_magnitude # turn in place
             elif left < self._safe_distance:
                 # Case 2
-                print("Obstacle in Front and Left")
+                # print("Obstacle in Front and Left")
                 # print("left motor:", 1, "right motor:", -1)
                 return self.velocity_magnitude, -self.velocity_magnitude # turn in place to the left or Clockwise
             elif right < self._safe_distance:
                 # Case 3
-                print("Obstacle in Front and Right")
+                # print("Obstacle in Front and Right")
                 # print("left motor:", -1, "right motor:", 1)
                 return -self.velocity_magnitude, self.velocity_magnitude # turn in place to the right or Counter-Clockwise
             else:
                 # Case 4
-                print("Obstacle in Front")
+                # print("Obstacle in Front")
                 # print("left motor:", 1, "right motor:", -1)
                 return self.velocity_magnitude, -self.velocity_magnitude # turn in place to the left or Clockwise
         else:
@@ -334,15 +441,15 @@ class StudentController:
             
             if left < self._safe_distance:
                 # Case 5
-                print("Obstacle  only to Left")
+                # print("Obstacle  only to Left")
                 turn_avoid = self.velocity_magnitude
             elif right < self._safe_distance:
                 # Case 6
-                print("Obstacle only to Right")
+                # print("Obstacle only to Right")
                 turn_avoid = -self.velocity_magnitude
             else:
                 # Case 7
-                print("No Obstacles in Front, Left, or Right")
+                # print("No Obstacles in Front, Left, or Right")
                 turn_avoid = 0.0
 
             dx = curr_goal_x - robot_x
@@ -354,14 +461,14 @@ class StudentController:
             turn_goal = self.velocity_magnitude * error
             forward_goal = self.velocity_magnitude * min(np.hypot(dx, dy), 1.0)
 
-            alpha = 0.7  # how much you trust obstacle avoidance
+            alpha = 0.607  # how much you trust obstacle avoidance
 
             turn = (1 - alpha) * turn_goal + alpha * turn_avoid
             forward = (1 - alpha) * forward_goal + alpha * forward_avoid
 
             left = forward - turn
             right = forward + turn
-            print("turn:", turn, "forward:", forward)
+            # print("turn:", turn, "forward:", forward)
             # print("left motor:", left, "right motor:", right)
             return left,right
     
@@ -397,7 +504,7 @@ class StudentController:
             
             if has_landmark:
                 continue # skip this goal if there is a landmark too close to it
-            if score < best_score:
+            if score * np.random.uniform(.8,1.2) < best_score: # added a random to add some variance in how it chooses scores
                 best_score = score
                 best_goal = goal
 

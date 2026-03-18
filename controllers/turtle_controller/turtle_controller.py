@@ -50,7 +50,7 @@ class TurtleBotController:
         # Odometry variables
         self.prev_position = self.true_pose()
 
-        self.reveal_correspondences = True
+        self.reveal_correspondences = False
         self.student_controller = StudentController()
 
     def provide_lidar(self):
