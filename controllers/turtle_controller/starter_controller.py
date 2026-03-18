@@ -30,7 +30,7 @@ class StudentController:
         self.goals = {} # dictionary with key as (x,y) and value as how many times we have been to that goal
         self.goals_subdivisions = 5 # number of subdivisions for the goals, so if 5 then will have 25 total goals in a 5x5 grid
         self.initialize_goals(self.goals_subdivisions)
-        self._safe_distance = .1 # safe distance to keep from obstacles
+        self._safe_distance = .15 # safe distance to keep from obstacles
         self.current_cell = None # where am I currently?
         self.current_goal = None # where am I trying to go?
         self.goal_reached_flag = False # have I reached my goal? if so, then I should pick a new goal
@@ -112,24 +112,34 @@ class StudentController:
     
     # predicts both the pose and the variance
     def prediction(self, sensors, pose_prediction):
-        # mu_bar_t, below is getting the estimate mean pose
+        """
+        EKF-SLAM prediction step:
+        - Only updates robot's pose and uncertainty
+        - Landmarks remain unchanged unless corrected
+        """
         delta_distance, delta_theta = sensors["odometry"]
-        pose_prediction[0] += delta_distance * math.cos(self._actual_theta) # update x position with new theta
-        pose_prediction[1] += delta_distance * math.sin(self._actual_theta) # update y position with new theta
-        # print("pose_prediction[0]:", pose_prediction[0])
-        # print("pose_prediction[1]:", pose_prediction[1])
 
-        # sigma_bar Below is to get the variance of the prediction
-        G_r = np.array([[1, 0], 
-                      [0, 1]]) # Jacobian of the motion model for robot
+        # --- 1) Predict robot pose ---
+        pose_prediction[0] += delta_distance * math.cos(self._actual_theta)
+        pose_prediction[1] += delta_distance * math.sin(self._actual_theta)
+        # note: orientation (theta) is tracked separately as self._actual_theta
 
-        # create entire jacobian 
-        G = np.eye(self._state_size)      # start with identity
-        G[0:2, 0:2] = G_r           # insert robot motion Jacobian
-        
+        # --- 2) Build Jacobian for robot part only ---
+        G_r = np.eye(2)  # robot motion Jacobian (x, y)
+        G = np.eye(self._state_size)
+        G[0:2, 0:2] = G_r  # robot portion
+
+        # --- 3) Propagate covariance ---
         variance_prediction = G @ self._prev_variance @ G.T
-        variance_prediction_noise = np.eye(self._state_size) * self._sigma**2
-        variance_prediction += variance_prediction_noise # add noise
+
+        # --- 4) Add process noise to robot only ---
+        variance_prediction_noise = np.zeros((self._state_size, self._state_size))
+        variance_prediction_noise[0:2, 0:2] = np.eye(2) * self._sigma**2  # robot motion noise
+        variance_prediction += variance_prediction_noise
+
+        # --- Landmarks remain frozen ---
+        # All covariance terms related to landmarks remain unchanged
+        # Their mean and variance will only update when observed in correction step
 
         return pose_prediction, variance_prediction
     
@@ -185,13 +195,15 @@ class StudentController:
 
                     P_rr = variance_correction[0:2, 0:2]
 
-                    P_ll = Gz @ R @ Gz.T + P_rr
-                    
-                    variance_correction[landmark_start:landmark_start+2, landmark_start:landmark_start+2] = P_ll # when new and just added, have more of a uncertainty
-                    
-                    # Robot covariance of how the robot is related to the the landmark
-                    variance_correction[0:2, landmark_start:landmark_start+2] = P_rr
-                    variance_correction[landmark_start:landmark_start+2, 0:2] = P_rr.T
+                    # --- Initialize new landmark variance properly ---
+                    landmark_init_var = 0.5  # adjust based on your world scale
+                    variance_correction[landmark_start:landmark_start+2, landmark_start:landmark_start+2] = np.eye(2) * landmark_init_var
+
+                    # --- Set robot-to-landmark covariance ---
+                    # variance_correction[0:2, landmark_start:landmark_start+2] = P_rr
+                    # variance_correction[landmark_start:landmark_start+2, 0:2] = P_rr.T
+                    variance_correction[0:2, landmark_start:landmark_start+2] = 0
+                    variance_correction[landmark_start:landmark_start+2, 0:2] = 0
                     
                     continue
                 
