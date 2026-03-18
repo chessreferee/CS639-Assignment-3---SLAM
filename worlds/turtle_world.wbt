@@ -29,37 +29,6 @@ DEF MY_ROBOT TurtleBot3Burger {
   supervisor TRUE
 }
 
-# DEF BOX_0 SolidBox {
-  # name "BOX_0"
-  # translation 1 1 0
-  # size 0.25 0.25 2
-# }
-
-# DEF BOX_1 SolidBox {
-  # name "BOX_1"
-  # translation -2 -2 0
-  # size 0.25 0.25 2
-# }
-
-# DEF BOX_2 SolidBox {
-  # name "BOX_2"
-  # translation 1 -2 0
-  # size 0.25 0.25 2
-# }
-
-
-# DEF BOX_3 SolidBox {
-  # name "BOX_3"
-  # translation -2 1 0
-  # size 0.25 0.25 2
-# }
-
-# DEF BOX_4 SolidBox {
-  # name "BOX_4"
-  # translation -0.5 -0.5 0
-  # size 0.25 0.25 2
-# }
-
 DEF BOX_0 SolidBox {
   name "BOX_0"
   translation 1 1 0
@@ -87,7 +56,38 @@ DEF BOX_3 SolidBox {
 
 DEF BOX_4 SolidBox {
   name "BOX_4"
-  translation -1 -1 0
+  translation -0.5 -0.5 0
   size 0.25 0.25 2
 }
+
+# DEF BOX_0 SolidBox {
+  # name "BOX_0"
+  # translation 1 1 0
+  # size 0.25 0.25 2
+# }
+
+# DEF BOX_1 SolidBox {
+  # name "BOX_1"
+  # translation -2 -2 0
+  # size 0.25 0.25 2
+# }
+
+# DEF BOX_2 SolidBox {
+  # name "BOX_2"
+  # translation 1 -2 0
+  # size 0.25 0.25 2
+# }
+
+
+# DEF BOX_3 SolidBox {
+  # name "BOX_3"
+  # translation -2 1 0
+  # size 0.25 0.25 2
+# }
+
+# DEF BOX_4 SolidBox {
+  # name "BOX_4"
+  # translation -1 -1 0
+  # size 0.25 0.25 2
+# }
 

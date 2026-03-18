@@ -38,7 +38,7 @@ class StudentController:
         self.velocity_magnitude = 5
         self.goal_steps_max = 670 # max number of steps trying to go to certain goal. the max steps shouldn't be too much as the goal_chooser should be choosing landmakrs that are close
         self.goal_steps = 0 # number of steps chasing this goal
-        self.GATE_THRESHOLD = 20 # with respect to variance, what should the Mahalanobis distance threshold be. A parameter to play around with
+        self.GATE_THRESHOLD = 24 # with respect to variance, what should the Mahalanobis distance threshold be. A parameter to play around with
         # below are for visualization
         self._fig, self._ax = plt.subplots()
         plt.ion()  # interactive mode on
@@ -191,12 +191,26 @@ class StudentController:
                 association = self.associate_unknown_landmark(z, pose_correction, variance_correction)
 
                 if association is None:
-                    # no acceptable match -> create a new landmark
-                    new_id = f"LM_{len(self._map_with_ordering)}"
-                    pose_correction, variance_correction, landmark_start = self.add_new_landmark(
-                        new_id, landmark_dist, landmark_heading, pose_correction, variance_correction
+                    candidate_mean, candidate_cov = self.compute_candidate_landmark(
+                        landmark_dist, landmark_heading, pose_correction, variance_correction
                     )
-                    continue
+
+                    duplicate_landmark_start = self.candidate_matches_existing_landmark(
+                        candidate_mean, candidate_cov, variance_correction
+                    )
+
+                    if duplicate_landmark_start is not None:
+                        # Treat this as that existing landmark instead of creating a new one
+                        landmark_start = duplicate_landmark_start
+                        h_predict, H_t = self.compute_measurement_model(pose_correction, landmark_start)
+                        R = np.diag([landmark_dist_noise**2, landmark_heading_noise**2])
+                        S = H_t @ variance_correction @ H_t.T + R
+                    else:
+                        new_id = f"LM_{len(self._map_with_ordering)}"
+                        pose_correction, variance_correction, landmark_start = self.add_new_landmark(
+                            new_id, landmark_dist, landmark_heading, pose_correction, variance_correction
+                        )
+                        continue
                 else:
                     landmark_start, H_t, h_predict, S, d2 = association
                     # proceed to EKF update below using associated landmark
@@ -222,6 +236,7 @@ class StudentController:
 
         return pose_correction, variance_correction
 
+# Helper methods for correction
     def wrap_angle(self, angle):
         return math.atan2(math.sin(angle), math.cos(angle))
 
@@ -257,52 +272,6 @@ class StudentController:
         ])
 
         return z_pred, H
-
-
-    def associate_unknown_landmark(self, z, pose, P):
-        """
-        Associate unknown measurement z=[range, bearing] with the most likely existing landmark
-        using Mahalanobis distance. Returns:
-            best_landmark_start, best_H, best_z_pred, best_S, best_d2
-        or None if no acceptable match exists.
-        """
-        if len(self._map_with_ordering) == 0:
-            return None
-
-        R = np.diag([landmark_dist_noise**2, landmark_heading_noise**2])
-
-        best = None
-        best_d2 = float("inf")
-
-        for landmark_id, slot in self._map_with_ordering.items():
-            landmark_start = 2 + 2 * slot
-
-            z_pred, H = self.compute_measurement_model(pose, landmark_start)
-
-            innovation = z - z_pred
-            innovation[1] = self.wrap_angle(innovation[1])
-
-            S = H @ P @ H.T + R
-
-            try:
-                S_inv = np.linalg.inv(S)
-            except np.linalg.LinAlgError:
-                continue
-
-            d2 = innovation.T @ S_inv @ innovation
-
-            if d2 < best_d2:
-                best_d2 = d2
-                best = (landmark_start, H, z_pred, S, d2)
-
-        # Gate threshold:
-        # 2D chi-square 95% ~= 5.99
-        # 2D chi-square 99% ~= 9.21
-
-        if best is None or best_d2 > self.GATE_THRESHOLD:
-            return None
-
-        return best
 
     def add_new_landmark(self, landmark_id, landmark_dist, landmark_heading, pose_correction, variance_correction):
         landmark_slot = len(self._map_with_ordering)
@@ -351,8 +320,113 @@ class StudentController:
         self._state_size = new_size
 
         return pose_correction, new_cov, landmark_start
+# below is for unknown Correspondance
+    def associate_unknown_landmark(self, z, pose, P):
+        """
+        Associate unknown measurement z=[range, bearing] with the most likely existing landmark
+        using Mahalanobis distance. Returns:
+            best_landmark_start, best_H, best_z_pred, best_S, best_d2
+        or None if no acceptable match exists.
+        """
+        if len(self._map_with_ordering) == 0:
+            return None
+
+        R = np.diag([landmark_dist_noise**2, landmark_heading_noise**2])
+
+        best = None
+        best_d2 = float("inf")
+
+        for landmark_id, slot in self._map_with_ordering.items():
+            landmark_start = 2 + 2 * slot
+
+            z_pred, H = self.compute_measurement_model(pose, landmark_start)
+
+            innovation = z - z_pred
+            innovation[1] = self.wrap_angle(innovation[1])
+
+            S = H @ P @ H.T + R
+
+            try:
+                S_inv = np.linalg.inv(S)
+            except np.linalg.LinAlgError:
+                continue
+
+            d2 = innovation.T @ S_inv @ innovation
+
+            if d2 < best_d2:
+                best_d2 = d2
+                best = (landmark_start, H, z_pred, S, d2)
+
+        # Gate threshold:
+        # 2D chi-square 95% ~= 5.99
+        # 2D chi-square 99% ~= 9.21
+
+        if best is None or best_d2 > self.GATE_THRESHOLD:
+            return None
+
+        return best
+    
+    def compute_candidate_landmark(self, landmark_dist, landmark_heading, pose_correction, variance_correction):
+        theta = self._actual_theta
+        r = landmark_dist
+        bearing = landmark_heading
+
+        candidate_mean = np.array([
+            pose_correction[0] + r * np.cos(theta + bearing),
+            pose_correction[1] + r * np.sin(theta + bearing)
+        ])
+
+        old_size = variance_correction.shape[0]
+
+        Gx = np.zeros((2, old_size))
+        Gx[:, 0:2] = np.eye(2)
+
+        Gz = np.array([
+            [np.cos(theta + bearing), -r * np.sin(theta + bearing)],
+            [np.sin(theta + bearing),  r * np.cos(theta + bearing)]
+        ])
+
+        R = np.diag([landmark_dist_noise**2, landmark_heading_noise**2])
+
+        candidate_cov = Gx @ variance_correction @ Gx.T + Gz @ R @ Gz.T
+
+        return candidate_mean, candidate_cov
+
+    def candidate_matches_existing_landmark(self, candidate_mean, candidate_cov, P):
+        """
+        Check whether a candidate new landmark in world coordinates is statistically
+        close to an existing landmark. If yes, return that landmark_start.
+        """
+        best_landmark_start = None
+        best_d2 = float("inf")
+
+        for landmark_id, slot in self._map_with_ordering.items():
+            landmark_start = 2 + 2 * slot
+
+            existing_mean = self._pose[landmark_start:landmark_start+2]
+            existing_cov = P[landmark_start:landmark_start+2, landmark_start:landmark_start+2]
+
+            diff = candidate_mean - existing_mean
+            S = candidate_cov + existing_cov
+
+            try:
+                d2 = diff.T @ np.linalg.solve(S, diff)
+            except np.linalg.LinAlgError:
+                continue
+
+            if d2 < best_d2:
+                best_d2 = d2
+                best_landmark_start = landmark_start
+
+        DUPLICATE_THRESHOLD = 9.21  # tune this
+
+        if best_landmark_start is not None and best_d2 < DUPLICATE_THRESHOLD:
+            return best_landmark_start
+
+        return None
 
 
+# Below is for control
     def robot_control(self, sensors, estimated_pose, estimated_map):
         # 1) Look at Lidar data and see if there is something in viscinity
         lidar = sensors["lidar"]
