@@ -34,7 +34,7 @@ class StudentController:
         self.current_cell = None # where am I currently?
         self.current_goal = None # where am I trying to go?
         self.goal_reached_flag = False # have I reached my goal? if so, then I should pick a new goal
-
+        self.velocity_magnitude = 4
         # below are for visualization
         self._fig, self._ax = plt.subplots()
         plt.ion()  # interactive mode on
@@ -309,37 +309,37 @@ class StudentController:
                 # Case 1
                 print("Obstacle in Front, Left, and Right")
                 # print("left motor:", -1, "right motor:", 1)
-                return -1.0, 1 # turn in place
+                return -self.velocity_magnitude, self.velocity_magnitude # turn in place
             elif left < self._safe_distance:
                 # Case 2
                 print("Obstacle in Front and Left")
                 # print("left motor:", 1, "right motor:", -1)
-                return 1, -1 # turn in place to the left or Clockwise
+                return self.velocity_magnitude, -self.velocity_magnitude # turn in place to the left or Clockwise
             elif right < self._safe_distance:
                 # Case 3
                 print("Obstacle in Front and Right")
                 # print("left motor:", -1, "right motor:", 1)
-                return -1, 1 # turn in place to the right or Counter-Clockwise
+                return -self.velocity_magnitude, self.velocity_magnitude # turn in place to the right or Counter-Clockwise
             else:
                 # Case 4
                 print("Obstacle in Front")
                 # print("left motor:", 1, "right motor:", -1)
-                return 1, -1 # turn in place to the left or Clockwise
+                return self.velocity_magnitude, -self.velocity_magnitude # turn in place to the left or Clockwise
         else:
             # Case 5-7, will be moving forward as well as backwards. This is a P controller
 
             # set initial values for these
             turn_avoid = 0.0
-            forward_avoid = 1.0
+            forward_avoid = self.velocity_magnitude
             
             if left < self._safe_distance:
                 # Case 5
                 print("Obstacle  only to Left")
-                turn_avoid = 1.0
+                turn_avoid = self.velocity_magnitude
             elif right < self._safe_distance:
                 # Case 6
                 print("Obstacle only to Right")
-                turn_avoid = -1.0
+                turn_avoid = -self.velocity_magnitude
             else:
                 # Case 7
                 print("No Obstacles in Front, Left, or Right")
@@ -378,6 +378,8 @@ class StudentController:
 
         for goal, count in self.goals.items():
             goal_x, goal_y = goal
+            if self.current_goal is not None and goal == self.current_goal:
+                continue # skip if this is the current goal we are trying to reach
             distance = math.sqrt((goal_x - robot_x)**2 + (goal_y - robot_y)**2)
             
             score = distance + count  # base score
@@ -543,7 +545,7 @@ class StudentController:
             cov_ll = covariance[idx:idx+2, idx:idx+2]
             self.plot_covariance_ellipse([lx, ly], cov_ll, ax, color='blue')
 
-            ax.plot([x, lx], [y, ly], 'g--', alpha=0.3)
+            # ax.plot([x, lx], [y, ly], 'g--', alpha=0.3)
 
         # =========================================================
         # 👀 OBSERVATIONS
